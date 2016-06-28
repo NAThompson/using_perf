@@ -9,8 +9,7 @@ Real dot_product(const Real * const a, const Real * const b, size_t n)
     Real s = 0;
     for(size_t i = 0; i < n; ++i)
     {
-      //s += a[i]*b[i];
-      s = std::fma(a[i], b[i], s);
+        s += a[i]*b[i];
     }
     return s;
 }
@@ -42,24 +41,5 @@ static void BM_dot_product(benchmark::State& state)
 }
 
 BENCHMARK_TEMPLATE(BM_dot_product, double)->RangeMultiplier(2)->Range(8, 16384)->Complexity();
-
-
-static void BM_Pow(benchmark::State& state)
-{
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<double> dis(1, 10);
-    auto s = dis(gen);
-    auto t = dis(gen);
-    double y;
-    while (state.KeepRunning())
-    {
-        benchmark::DoNotOptimize(y = std::pow(s, t));
-    }
-    std::ostream cnull(0);
-    cnull << y;
-}
-
-//BENCHMARK(BM_Pow);
 
 BENCHMARK_MAIN();
