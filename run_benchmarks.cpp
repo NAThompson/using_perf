@@ -40,6 +40,6 @@ static void BM_dot_product(benchmark::State& state)
     state.SetComplexityN(state.range_x());
 }
 
-BENCHMARK_TEMPLATE(BM_dot_product, double)->RangeMultiplier(2)->Range(8, 16384)->Complexity();
+BENCHMARK_TEMPLATE(BM_dot_product, double)->RangeMultiplier(2)->Range(8, std::pow(2, 18))->Complexity();
 
 BENCHMARK_MAIN();

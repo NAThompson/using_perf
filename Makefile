@@ -1,5 +1,5 @@
 CXX=clang++
-CPPFLAGS:= -std=c++14 -O3 -g -fno-omit-frame-pointer
+CPPFLAGS:= -std=c++14 -O3 -Ofast -g -fno-omit-frame-pointer -march=native
 
 all: run_benchmarks.x run_benchmarks.s
 
