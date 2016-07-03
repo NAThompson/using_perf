@@ -217,3 +217,181 @@ You will see the generated assembly:
 - `t`: Switch between percentage and samples
 - `J`: Number of jump sources on target; number of places that can jump here.
 - `s`: Hide/Show source code
+
+
+---
+
+# perf gotchas
+
+perf sometimes attributes the time in a single instruction to the *next* instruction.
+
+    Example:
+
+```bash
+     │         if (absx < 1)
+7.76 │       ucomis xmm1,QWORD PTR [rbp-0x20]
+0.95 │     ↓ jbe    a6
+1.82 │       movsd  xmm0,QWORD PTR ds:0x46a198
+0.01 │       movsd  xmm1,QWORD PTR ds:0x46a1a0
+0.01 |       movsd  xmm2,QWORD PTR ds:0x46a100 
+```
+
+Hmm, so one the first move into the register is 182x slower than the second, and it's right after a jump instruction . . .
+
+Looks like a misattribution of time.
+
+
+---
+
+# Generating wins with perf: dot product example
+
+Let's first compile the following dot product at -O0 and see what the compiler does with it:
+
+```cpp
+template<typename Real>
+Real dot_product(const Real * const a, const Real * const b, size_t n)
+{
+    Real s = 0;
+    for(size_t i = 0; i < n; ++i)
+    {
+        auto tmp = a[i]*b[i];
+        s += tmp;
+    }
+    return s;
+}
+```
+
+---
+
+# Dot product example: O0
+
+![Basic usage of perf](figures/dot_product_O0.png?raw=true "Dot product at -O0")
+
+
+---
+
+# Dot product example:
+
+Quick note about Linux's System V ABI:
+
+- A floating point return value is placed in register `xmm0`.
+- The first integer argument is placed in `rdi`
+- The second integer argument is placed in `rsi`
+- The third integer argument is placed in `rdx`
+
+
+---
+
+# Dot product example:
+
+Some comments about our assembly:
+
+```nasm
+Real dot_product(const Real * const a, const Real * const b, size_t n)
+{
+push   rbp
+mov    rbp, rsp                 ; Establish a stack frame for our function
+xorps  xmm0, xmm0               ; Clear out xmm0, as it will be used for our return value
+mov    QWORD PTR [rbp-0x8],rdi  ; rdi is first argument; place address of a on stack
+mov    QWORD PTR [rbp-0x10],rsi ; rsi is second argument; place address of b on stack
+mov    QWORD PTR [rbp-0x18],rdx ; rdx is third argument; place length of array on stack
+```
+
+I personally see no good reason to copy the integer registers to the stack, but perhaps this is a -O0 artefact.
+
+
+---
+
+# Dot product example:
+
+```nasm
+Real s = 0;
+movsd  QWORD PTR [rbp-0x20],xmm0
+```
+
+This sets `s` to zero and places it on the stack.
+
+Again I see no reason for `s` to ever leave the `xmm0` register.
+
+---
+
+# Dot product example
+
+```nasm
+for (size_t i = 0; i < n; ++i)
+      mov    QWORD PTR [rbp-0x28],0x0            ; set i = 0, but why not use a count register?
+20:   mov    rax,QWORD PTR [rbp-0x28]            ; copy i into rax, note that this line is the target of a jump
+      cmp    rax,QWORD PTR [rbp-0x18]            ; compare i with n
+      jae    6d                                  ; jump to 6d if i is "after or equal" to n
+      ; stuff . . .
+6d:   movsd  xmm0,QWORD PTR [rbp-0x20]           ; move s to xmm0 (System V abi convention)
+      pop    rbp                                 ; increment base pointer
+      ret                                        ; return control to caller
+```
+
+
+# Dot product example
+
+```nasm
+auto tmp = a[i]*b[i];
+mov    rax,QWORD PTR [rbp-0x28]          ; copy i into rax *again*!
+mov    rcx,QWORD PTR [rbp-0x8]           ; move address of a into rcx, why didn't we just leave it in rdi?
+movsd  xmm0,QWORD PTR [rcx+rax*8]        ; move a[i] into xmm0
+mov    rax,QWORD PTR [rbp-0x28]          ; copy i into rax *again*!
+mov    rcx,QWORD PTR [rbp-0x10]          ; move address of b into rcx, why didn't we just leave it in rsi?
+mulsd  xmm0,QWORD PTR [rcx+rax*8]        ; a[i]*b[i]
+movsd  QWORD PTR [rbp-0x30],xmm0         ; push tmp onto stack
+s += tmp;
+movsd  xmm0,QWORD PTR [rbp-0x30]         ; move tmp from stack back to where it was
+addsd  xmm0,QWORD PTR [rbp-0x20]         ; add tmp to s
+movsd  QWORD PTR [rbp-0x20],xmm0         ; mov s back to stack
+```
+
+---
+
+# Dot product example
+
+```nasm
+mov    rax,QWORD PTR [rbp-0x28]         ; copy i into rax a fourth time?!!
+add    rax,0x1                          ; i = i + 1
+mov    QWORD PTR [rbp-0x28],rax         ; copy rax back into stack
+jmp    20                               ; go to top of loop
+```
+
+---
+
+# Dot product example
+
+The compiler basically screwed up everything. Benchmarking put it the timing a 2.55N nanoseconds, where N is the array length.
+
+
+---
+
+# Dot product example
+
+The following uses more registers, and benchmarks at 0.8N nanoseconds:
+
+
+```cpp
+double easy_asm_dot_product(const double * const a, const double * const b, size_t n)
+{
+    double s = 0;
+    asm volatile(".intel_syntax noprefix;"
+                 "mov rdx, QWORD PTR [rbp - 0x18];"
+                 "xorps xmm0, xmm0;"
+                 "xor rax, rax;" // set i = 0
+                 "begin: cmp rax, rdx;" // compare i to n
+                 "jae end;"
+                 "movsd xmm1, QWORD PTR [rdi + 8*rax];" // move a[i] into xmm1
+                 "movsd xmm2, QWORD PTR [rsi + 8*rax];" // move b[i] into xmm2
+                 "mulsd xmm2, xmm1;" // a[i]*b[i] in xmm2
+                 "addsd xmm0, xmm2;" // s += a[i]*b[i]
+                 "inc rax;"          // i = i + 1
+                 "jmp begin;"        // jump to top of loop
+                 "end: nop;"
+                 :
+                 : "r" (&s)
+                 );
+    return s;
+}
+```
