@@ -10,7 +10,6 @@ double xmm_dot_product(const double * const a, const double * const b, size_t n)
     double s = 0;
     asm volatile(".intel_syntax noprefix;"
                  "mov rdx, QWORD PTR [rbp - 0x18];" // Annoying: n is pushed onto the stack rather than being left in rdx
-                 "xor rax, rax;" // set i = 0
                  "vzeroall;" // Set s = 0
                  "test rdx, rdx;" // if n = 0 . . .
                  "je 2f;"          // return
@@ -147,6 +146,6 @@ static void BM_dot_product(benchmark::State& state)
     state.SetComplexityN(state.range_x());
 }
 
-BENCHMARK_TEMPLATE(BM_dot_product, double)->RangeMultiplier(2)->Range(8, std::pow(2, 18))->Complexity();
+BENCHMARK_TEMPLATE(BM_dot_product, double)->RangeMultiplier(2)->Range(8, std::pow(2, 18))->Complexity(benchmark::oN);
 
 BENCHMARK_MAIN();

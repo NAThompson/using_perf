@@ -241,6 +241,14 @@ Looks like a misattribution of the `jbe`.
 
 ---
 
+# perf gotchas
+
+- Unrolled loops make the correspondence between source code and assembly instructions incomprehensible:
+
+![inline](figures/UnrolledLoops.png?raw=true "Unrolled Loops")
+
+---
+
 # Generating wins with perf:
 
 Let's first compile the following dot product at -O0 and see what the compiler does with it:
@@ -357,7 +365,7 @@ mov    QWORD PTR [rbp-0x28],rax ; copy rax back into stack
 jmp    20                       ; go to top of loop
 ```
 
-vv---
+---
 
 # Dot product example
 
@@ -402,7 +410,7 @@ Interestingly, compiling at -O3 gives identical performance to our handcoded ass
 The compiler starts using more `xmm` registers, and stops doing (as many) superfluous writes to the stack.
 
 
-```nasm
+```x86asm
       xorpd  xmm0,xmm0  ; clear out xmm0 register
       test   rdx,rdx    ; if n = 0, return
       je     29
@@ -424,12 +432,87 @@ The compiler starts using more `xmm` registers, and stops doing (as many) superf
 
 But even at -O3, we're still only using 64 bits of the 128 `xmm` registers, and the `xmm` registers are the first 128 bits of the `ymm` registers.
 
-Let's see if we can do better.
+Neither clang-3.9 nor gcc-5.3 using any packed instructions, which is incredibly conservative as the SSE instruction set has been available since 2001.
 
+Let's see if we can do better.
 
 ---
 
 # Dot product example
 
 
+To do better, we'll use SSE2 packed adds and multiplies, doing two adds/mults at a time:
 
+```x86asm
+      vzeroall                       ; Zero all ymm registers
+      test   rdx,rdx                 ; Test if n = 0
+      je     4a                      ; Jump to 4a if n = 0
+2c:   movapd xmm1,XMMWORD PTR [rdi]  ; Move a[i] and a[i+1] into xmm1
+      mulpd  xmm1,XMMWORD PTR [rsi]  ; a[i]*b[i], a[i+1]*b[i+1] in xmm1
+      addpd  xmm0,xmm1               ; a[0]*b[0]+a[2]*b[2] + ... in low bits of xxmm0
+                                     ; a[1]*b[1]+a[3]*b[3] + ... in high bits of mm0
+      add    rdi,0x10                ; i->i+2; or increment a by 16 bytes
+      add    rsi,0x10                ; i->i+2; or increment b by 16 bytes
+      sub    rdx,0x2                 ; n->n-2
+      jne    2c                      ; jump to top if rdx != 0
+4a:   haddpd xmm0,xmm0               ; add low bits of xmm0 to high bits.
+```
+
+This benchmarks at 0.45N ns.
+
+---
+
+# Dot product example
+
+But why was the compiler so conservative?
+
+In order to get the compiler to generate SSE instructions, we need to give it the `-Ofast` flag.
+
+With the `-Ofast` flag, the compiler generates the `addpd` and `mulpd` instructions.
+
+The dot product runs at 0.45N ns.
+
+
+---
+
+# Dot product example
+
+Even with `-Ofast`, we're still not utilizing the 256 bit `ymm` registers.
+
+By adding the `-march=native` compiler flag, we generate the `vaddpd`, `vmulpd` instructions.
+
+This allows us to do 4 double precision adds and 4 double precision multiplies at one go.
+
+But unfortunately, on my machine, it only runs at 0.42N ns.
+
+I was unable to improve on this with hand-coded assembly.
+
+---
+
+# Note on ymm registers
+
+- To determine if you CPU supports `ymm` registers, check for the avx instruction set via
+
+```bash
+$ lscpu | grep avx
+Flags:                 fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx rdtscp lm constant_tsc arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc aperfmperf eagerfpu pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm epb tpr_shadow vnmi flexpriority ept vpid fsgsbase smep erms xsaveopt dtherm ida arat pln pts
+```
+
+or (on Centos)
+
+```bash
+$ cat /proc/cpuinfo | grep avx
+```
+
+---
+
+# Dot product example
+
+Last note: If your architecture support fma (`lscpu | grep fma`), then make sure your dot product is using it!
+
+```x64asm
+b0:   vmovup ymm2,YMMWORD PTR [rax-0xe0]
+      vmovup ymm3,YMMWORD PTR [rax-0xc0]
+      vfmadd ymm2,ymm0,YMMWORD PTR [rcx-0xe0]    ; ymm2 = ymm2 + ymm0*[rcx-0xe0]
+      vfmadd ymm3,ymm1,YMMWORD PTR [rcx-0xc0]    ;
+```
