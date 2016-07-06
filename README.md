@@ -357,7 +357,7 @@ mov    QWORD PTR [rbp-0x28],rax ; copy rax back into stack
 jmp    20                       ; go to top of loop
 ```
 
----
+vv---
 
 # Dot product example
 
@@ -392,3 +392,44 @@ double easy_asm_dot_product(const double * const a, const double * const b, size
     return s;
 }
 ```
+
+---
+
+# Dot product example
+
+Interestingly, compiling at -O3 gives identical performance to our handcoded assembly, at 0.8N nanoseconds.
+
+The compiler starts using more `xmm` registers, and stops doing (as many) superfluous writes to the stack.
+
+
+```nasm
+      xorpd  xmm0,xmm0  ; clear out xmm0 register
+      test   rdx,rdx    ; if n = 0, return
+      je     29
+      nop
+10:   movsd  xmm1,QWORD PTR [rdi] ; move a[i] to xmm1
+      mulsd  xmm1,QWORD PTR [rsi] ; xmm1 = a[i]*b[i]
+      addsd  xmm0,xmm1            ; s = s + xmm1 = s + a[i]*b[i]
+      add    rdi,0x8              ; move a's pointer offset by 8 bytes
+      add    rsi,0x8              ; move b's pointer offset by 8 bytes
+      dec    rdx                  ; n -> n-1
+      jne    10                   ; jump to beginning of loop if rdx > 0.
+29:   ret
+```
+
+---
+
+# Dot product example
+
+
+But even at -O3, we're still only using 64 bits of the 128 `xmm` registers, and the `xmm` registers are the first 128 bits of the `ymm` registers.
+
+Let's see if we can do better.
+
+
+---
+
+# Dot product example
+
+
+
