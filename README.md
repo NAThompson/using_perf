@@ -241,9 +241,7 @@ Looks like a misattribution of the `jbe`.
 
 ---
 
-# perf gotchas
-
-- Unrolled loops make the correspondence between source code and assembly instructions incomprehensible:
+Gotcha: Unrolled loops make the correspondence between source and assembly incomprehensible:
 
 ![inline](figures/UnrolledLoops.png?raw=true "Unrolled Loops")
 
@@ -370,7 +368,9 @@ jmp    20                       ; go to top of loop
 # Dot product example
 
 - The compiler basically screwed up everything.
-- Benchmarking put it the timing a 2.55N nanoseconds, where N is the array length.
+- Benchmarking put it the timing a 2.55N nanoseconds, where N is the array length 
+
+(All benchmarks are Ivy Bridge, 3700MHz, single core.)
 
 
 ---
@@ -407,7 +407,10 @@ double easy_asm_dot_product(const double * const a, const double * const b, size
 
 Interestingly, compiling at -O3 gives identical performance to our handcoded assembly, at 0.8N nanoseconds.
 
-The compiler starts using more `xmm` registers, and stops doing (as many) superfluous writes to the stack.
+
+---
+
+At -O3, the compiler starts using more `xmm` registers, and stops doing (as many) superfluous writes to the stack.
 
 
 ```x86asm
@@ -420,7 +423,7 @@ The compiler starts using more `xmm` registers, and stops doing (as many) superf
       addsd  xmm0,xmm1            ; s = s + xmm1 = s + a[i]*b[i]
       add    rdi,0x8              ; move a's pointer offset by 8 bytes
       add    rsi,0x8              ; move b's pointer offset by 8 bytes
-      dec    rdx                  ; n -> n-1
+      dec    rdx                  ; n <- n-1
       jne    10                   ; jump to beginning of loop if rdx > 0.
 29:   ret
 ```
@@ -430,16 +433,13 @@ The compiler starts using more `xmm` registers, and stops doing (as many) superf
 # Dot product example
 
 
-But even at -O3, we're still only using 64 bits of the 128 `xmm` registers, and the `xmm` registers are the first 128 bits of the `ymm` registers.
+- But even at -O3, we're still only using 64 bits of the 128 `xmm` registers, and the `xmm` registers are the first 128 bits of the `ymm` registers.
 
-Neither clang-3.9 nor gcc-5.3 using any packed instructions, which is incredibly conservative as the SSE instruction set has been available since 2001.
+- Neither clang-3.9 nor gcc-5.3 use any packed instructions, which is incredibly conservative as the SSE instruction set has been available since 2001.
 
-Let's see if we can do better.
+Let's see if we can do better . . .
 
 ---
-
-# Dot product example
-
 
 To do better, we'll use SSE2 packed adds and multiplies, doing two adds/mults at a time:
 
@@ -449,11 +449,11 @@ To do better, we'll use SSE2 packed adds and multiplies, doing two adds/mults at
       je     4a                      ; Jump to 4a if n = 0
 2c:   movapd xmm1,XMMWORD PTR [rdi]  ; Move a[i] and a[i+1] into xmm1
       mulpd  xmm1,XMMWORD PTR [rsi]  ; a[i]*b[i], a[i+1]*b[i+1] in xmm1
-      addpd  xmm0,xmm1               ; a[0]*b[0]+a[2]*b[2] + ... in low bits of xxmm0
-                                     ; a[1]*b[1]+a[3]*b[3] + ... in high bits of mm0
-      add    rdi,0x10                ; i->i+2; or increment a by 16 bytes
-      add    rsi,0x10                ; i->i+2; or increment b by 16 bytes
-      sub    rdx,0x2                 ; n->n-2
+      addpd  xmm0,xmm1               ; a[0]*b[0]+a[2]*b[2] + ... in low bits of xmm0
+                                     ; a[1]*b[1]+a[3]*b[3] + ... in high bits of xmm0
+      add    rdi,0x10                ; i<-i+2; or increment a by 16 bytes
+      add    rsi,0x10                ; i<-i+2; or increment b by 16 bytes
+      sub    rdx,0x2                 ; n<-n-2
       jne    2c                      ; jump to top if rdx != 0
 4a:   haddpd xmm0,xmm0               ; add low bits of xmm0 to high bits.
 ```
@@ -466,36 +466,42 @@ This benchmarks at 0.45N ns.
 
 But why was the compiler so conservative?
 
-In order to get the compiler to generate SSE instructions, we need to give it the `-Ofast` flag.
+- In order to get the compiler to generate SSE instructions, we need to give it the `-Ofast` flag.
+ 
+- With the `-Ofast` flag, the compiler generates the `addpd` and `mulpd` instructions.
 
-With the `-Ofast` flag, the compiler generates the `addpd` and `mulpd` instructions.
-
-The dot product runs at 0.45N ns.
+The dot product then runs at 0.45N ns.
 
 
 ---
 
-# Dot product example
+Even with `-Ofast`, neither gcc nor clang utilize the 256 bit `ymm` registers.
 
-Even with `-Ofast`, we're still not utilizing the 256 bit `ymm` registers.
+- By adding the `-march=native` compiler flag, we generate the `vaddpd`, `vmulpd` instructions.
 
-By adding the `-march=native` compiler flag, we generate the `vaddpd`, `vmulpd` instructions.
+- This allows us to do 4 double precision adds and 4 double precision multiplies in one instruction.
 
-This allows us to do 4 double precision adds and 4 double precision multiplies at one go.
+---
 
-But unfortunately, on my machine, it only runs at 0.42N ns.
+# Using ymm registers
+
+But unfortunately, on Ivy Bridge, it only runs at 0.42N ns, which is not much of an improvement.
 
 I was unable to improve on this with hand-coded assembly.
 
 ---
 
-# Note on ymm registers
-
-- To determine if you CPU supports `ymm` registers, check for the avx instruction set via
+To determine if your CPU has `ymm` registers, check for avx instruction support:
 
 ```bash
 $ lscpu | grep avx
-Flags:                 fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx rdtscp lm constant_tsc arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc aperfmperf eagerfpu pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm epb tpr_shadow vnmi flexpriority ept vpid fsgsbase smep erms xsaveopt dtherm ida arat pln pts
+Flags:
+fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush
+dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx rdtscp lm constant_tsc arch_perfmon
+pebs bts rep_good nopl xtopology nonstop_tsc aperfmperf eagerfpu pni pclmulqdq dtes64
+monitor ds_cpl vmx smx est tm2 ssse3 cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic popcnt
+tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm epb tpr_shadow vnmi 
+flexpriority ept vpid fsgsbase smep erms xsaveopt dtherm ida arat pln pts
 ```
 
 or (on Centos)
@@ -508,11 +514,8 @@ $ cat /proc/cpuinfo | grep avx
 
 # Dot product example
 
-Last note: If your architecture support fma (`lscpu | grep fma`), then make sure your dot product is using it!
+Last note: If your architecture supports the fused-multiply add instruction (`$ lscpu | grep fma`), then make sure your dot product is using it!
 
-```x64asm
-b0:   vmovup ymm2,YMMWORD PTR [rax-0xe0]
-      vmovup ymm3,YMMWORD PTR [rax-0xc0]
-      vfmadd ymm2,ymm0,YMMWORD PTR [rcx-0xe0]    ; ymm2 = ymm2 + ymm0*[rcx-0xe0]
-      vfmadd ymm3,ymm1,YMMWORD PTR [rcx-0xc0]    ;
+```x86asm
+      vfmadd ymm3,ymm1,YMMWORD PTR [rcx-0xc0]
 ```
